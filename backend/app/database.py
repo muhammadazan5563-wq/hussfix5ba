@@ -2281,9 +2281,46 @@ async def delete_new_venture(record_id: str) -> bool:
 # Users & Auth
 # ═════════════════════════════════════════════════════════════════════════════
 
+async def mark_stale_users_offline(stale_threshold_minutes: int = 65) -> int:
+    """Mark users as offline if they haven't sent a heartbeat within the threshold.
+
+    This handles edge cases where the browser crashed or the beforeunload
+    event didn't fire, leaving users stuck in is_online=True state.
+    Returns the number of users marked offline.
+    """
+    pool = get_pool()
+    try:
+        result = await pool.execute(
+            """
+            UPDATE users
+            SET is_online = false, last_active = NOW()::text
+            WHERE is_online = true
+              AND last_active IS NOT NULL
+              AND last_active != 'Never'
+              AND (
+                last_active !~ '^\d{4}-\d{2}-\d{2}T'
+                OR (last_active ~ '^\d{4}-\d{2}-\d{2}T'
+                    AND (NOW() - last_active::timestamptz) > make_interval(mins => $1))
+              )
+            """,
+            stale_threshold_minutes,
+        )
+        parts = result.split(" ")
+        count = int(parts[-1]) if len(parts) > 1 else 0
+        if count > 0:
+            print(f"[DB] Marked {count} stale user(s) as offline (threshold={stale_threshold_minutes}min)")
+        return count
+    except Exception as e:
+        print(f"[DB] Error marking stale users offline: {e}")
+        return 0
+
+
 async def fetch_users() -> list[dict]:
     pool = get_pool()
     try:
+        # Clean up stale online users before returning the list
+        await mark_stale_users_offline()
+
         rows = await pool.fetch(
             "SELECT id, user_id, name, email, role, plan, daily_limit, "
             "records_extracted_today, last_active, ip_address, is_online, "
