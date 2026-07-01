@@ -308,6 +308,7 @@ async def api_fetch_carriers(
     legal_name: str = Query(None),
     officer_name: str = Query(None),
     entity_type: str = Query(None),
+    reactivation: str = Query(None),
     active: str = Query(None),
     state: str = Query(None),
     has_email: str = Query(None),
@@ -359,6 +360,7 @@ async def api_fetch_carriers(
     if legal_name: filters["legal_name"] = legal_name
     if officer_name: filters["officer_name"] = officer_name
     if entity_type: filters["entity_type"] = entity_type
+    if reactivation: filters["reactivation"] = reactivation
     if active: filters["active"] = active
     if state: filters["state"] = state
     if has_email: filters["has_email"] = has_email
