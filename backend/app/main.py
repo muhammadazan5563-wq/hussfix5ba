@@ -498,6 +498,8 @@ async def api_auth_check_status(request: Request):
     1. User's is_blocked field in the database
     2. User's IP being in the blocked_ips table
     
+    Also acts as a heartbeat: updates is_online=True and last_active=Now
+    so the admin panel accurately reflects online status.
     Frontend should poll this every hour to enforce bans on active sessions.
     """
     user_payload = getattr(request.state, "user", None)
@@ -505,6 +507,7 @@ async def api_auth_check_status(request: Request):
         return JSONResponse(status_code=401, content={"error": "Authentication required"})
     
     user_email = user_payload.get("email", "")
+    user_id = user_payload.get("sub", "")
     client_ip = _get_request_ip(request)
     
     # Check if user is blocked in the users table
@@ -525,11 +528,40 @@ async def api_auth_check_status(request: Request):
     elif ip_blocked:
         reason = "Your IP address has been blocked."
     
+    # Heartbeat: mark user as online and update last_active
+    if not is_banned and user_id:
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).isoformat()
+        await update_user(user_id, {
+            "is_online": True,
+            "last_active": now_iso,
+            "ip_address": client_ip or "",
+        })
+    
     return {
         "allowed": not is_banned,
         "blocked": is_banned,
         "reason": reason,
     }
+
+
+@app.post("/api/auth/offline")
+async def api_auth_mark_offline(request: Request):
+    """Mark the current user as offline (called on browser close/tab close)."""
+    user_payload = getattr(request.state, "user", None)
+    if not user_payload:
+        return JSONResponse(status_code=401, content={"error": "Authentication required"})
+    
+    user_id = user_payload.get("sub", "")
+    if user_id:
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).isoformat()
+        await update_user(user_id, {
+            "is_online": False,
+            "last_active": now_iso,
+        })
+    
+    return {"success": True}
 
 
 @app.post("/api/auth/login")
