@@ -1081,6 +1081,13 @@ async def fetch_carriers(filters: dict) -> dict:
             ctes.append(("_brokers", "SELECT dot_number FROM carriers WHERE classdef ILIKE '%broker%'"))
             conditions.append("c.dot_number NOT IN (SELECT dot_number FROM _brokers)")
 
+    # Reactivation filter: has both USDOT and MC but still not authorized
+    reactivation = filters.get("reactivation")
+    if reactivation == "true":
+        conditions.append("c.dot_number IS NOT NULL AND c.dockets IS NOT NULL AND jsonb_array_length(c.dockets) > 0 AND (c.docket1_status_code IS NULL OR c.docket1_status_code != 'A')")
+    elif reactivation == "false":
+        conditions.append("NOT (c.dot_number IS NOT NULL AND c.dockets IS NOT NULL AND jsonb_array_length(c.dockets) > 0 AND (c.docket1_status_code IS NULL OR c.docket1_status_code != 'A'))")
+
     if filters.get("classification"):
         classifications = filters["classification"]
         if isinstance(classifications, str):
