@@ -499,6 +499,7 @@ async def api_auth_check_status(request: Request):
     2. User's IP being in the blocked_ips table
     
     Frontend should poll this every hour to enforce bans on active sessions.
+    Also updates last_active timestamp and is_online status.
     """
     user_payload = getattr(request.state, "user", None)
     if not user_payload:
@@ -512,6 +513,15 @@ async def api_auth_check_status(request: Request):
     user_blocked = False
     if user and user.get("is_blocked"):
         user_blocked = True
+    
+    # Update last_active and is_online for the user
+    if user and user.get("user_id"):
+        from datetime import datetime, timezone
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        await update_user(user["user_id"], {
+            "last_active": now_str,
+            "is_online": True,
+        })
     
     # Check if user's IP is blocked
     ip_blocked = False
@@ -560,6 +570,15 @@ async def api_auth_login(request: Request):
             status_code=403,
             content={"error": "Login not allowed from this IP address. Contact your administrator."},
         )
+    # Update last_active and is_online on login
+    from datetime import datetime, timezone
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    await update_user(user["user_id"], {
+        "last_active": now_str,
+        "is_online": True,
+        "ip_address": client_ip or "",
+    })
+
     token = create_token(
         user_id=user["user_id"],
         email=user["email"],
@@ -575,9 +594,9 @@ async def api_auth_login(request: Request):
             "plan": user["plan"],
             "daily_limit": user["daily_limit"],
             "records_extracted_today": user["records_extracted_today"],
-            "last_active": user.get("last_active", "Never"),
-            "ip_address": user.get("ip_address", ""),
-            "is_online": user.get("is_online", False),
+            "last_active": now_str,
+            "ip_address": client_ip or user.get("ip_address", ""),
+            "is_online": True,
             "is_blocked": user.get("is_blocked", False),
             "allowed_ips": user.get("allowed_ips", []),
         },
