@@ -2282,6 +2282,11 @@ async def delete_new_venture(record_id: str) -> bool:
 # ═════════════════════════════════════════════════════════════════════════════
 
 async def fetch_users() -> list[dict]:
+    """Fetch all users and dynamically compute online status.
+    
+    A user is considered online if their last_active timestamp is within
+    the last 65 minutes (slightly more than the 1-hour polling interval).
+    """
     pool = get_pool()
     try:
         rows = await pool.fetch(
@@ -2289,7 +2294,25 @@ async def fetch_users() -> list[dict]:
             "records_extracted_today, last_active, ip_address, is_online, "
             "is_blocked, allowed_ips, created_at, updated_at FROM users ORDER BY created_at DESC"
         )
-        return [_user_row_to_dict(row) for row in rows]
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        offline_threshold = timedelta(minutes=65)
+        
+        users = []
+        for row in rows:
+            user = _user_row_to_dict(row)
+            # Dynamically compute is_online based on last_active
+            last_active = user.get("last_active", "Never")
+            if last_active and last_active != "Never":
+                try:
+                    last_active_dt = datetime.strptime(last_active, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                    user["is_online"] = (now - last_active_dt) < offline_threshold
+                except (ValueError, TypeError):
+                    user["is_online"] = False
+            else:
+                user["is_online"] = False
+            users.append(user)
+        return users
     except Exception as e:
         print(f"[DB] Error fetching users: {e}")
         return []
