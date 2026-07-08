@@ -568,6 +568,9 @@ async def api_auth_login(request: Request):
     # Update last_active and is_online on login
     await update_user_last_active(user["user_id"], ip_address=client_ip or "")
 
+    from datetime import datetime, timezone
+    login_time_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
     token = create_token(
         user_id=user["user_id"],
         email=user["email"],
@@ -583,7 +586,7 @@ async def api_auth_login(request: Request):
             "plan": user["plan"],
             "daily_limit": user["daily_limit"],
             "records_extracted_today": user["records_extracted_today"],
-            "last_active": now_str,
+            "last_active": login_time_str,
             "ip_address": client_ip or user.get("ip_address", ""),
             "is_online": True,
             "is_blocked": user.get("is_blocked", False),
