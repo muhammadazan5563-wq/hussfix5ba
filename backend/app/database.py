@@ -2281,57 +2281,36 @@ async def delete_new_venture(record_id: str) -> bool:
 # Users & Auth
 # ═════════════════════════════════════════════════════════════════════════════
 
-async def update_user_last_active(user_id: str, ip_address: str = None) -> bool:
-    """Update user's last_active to NOW() using PostgreSQL's clock (timezone-aware).
-    
-    This avoids timezone mismatches between Python and PostgreSQL.
-    """
-    pool = get_pool()
-    try:
-        if ip_address is not None:
-            result = await pool.execute(
-                "UPDATE users SET last_active = TO_CHAR(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'), "
-                "is_online = true, ip_address = $2 WHERE user_id = $1",
-                user_id, ip_address,
-            )
-        else:
-            result = await pool.execute(
-                "UPDATE users SET last_active = TO_CHAR(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'), "
-                "is_online = true WHERE user_id = $1",
-                user_id,
-            )
-        return not result.endswith("0")
-    except Exception as e:
-        print(f"[DB] Error updating last_active for user {user_id}: {e}")
-        return False
-
-
 async def fetch_users() -> list[dict]:
     """Fetch all users and dynamically compute online status.
     
     A user is considered online if their last_active timestamp is within
     the last 65 minutes (slightly more than the 1-hour polling interval).
-    Uses PostgreSQL's NOW() for comparison to avoid timezone mismatches.
     """
     pool = get_pool()
     try:
-        # Use PostgreSQL to compute is_online directly, avoiding Python timezone issues
         rows = await pool.fetch(
             "SELECT id, user_id, name, email, role, plan, daily_limit, "
-            "records_extracted_today, last_active, ip_address, "
-            "CASE "
-            "  WHEN last_active IS NULL OR last_active = 'Never' OR last_active = '' THEN false "
-            "  ELSE (TO_TIMESTAMP(last_active, 'YYYY-MM-DD HH24:MI:SS') "
-            "        > (NOW() AT TIME ZONE 'UTC' - INTERVAL '65 minutes')) "
-            "END AS is_online, "
+            "records_extracted_today, last_active, ip_address, is_online, "
             "is_blocked, allowed_ips, created_at, updated_at FROM users ORDER BY created_at DESC"
         )
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        offline_threshold = timedelta(minutes=65)
         
         users = []
         for row in rows:
             user = _user_row_to_dict(row)
-            # is_online is already computed by PostgreSQL
-            user["is_online"] = row["is_online"] if row["is_online"] is not None else False
+            # Dynamically compute is_online based on last_active
+            last_active = user.get("last_active", "Never")
+            if last_active and last_active != "Never":
+                try:
+                    last_active_dt = datetime.strptime(last_active, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                    user["is_online"] = (now - last_active_dt) < offline_threshold
+                except (ValueError, TypeError):
+                    user["is_online"] = False
+            else:
+                user["is_online"] = False
             users.append(user)
         return users
     except Exception as e:
