@@ -26,7 +26,7 @@ from app.database import (
     update_carrier_insurance as db_update_carrier_insurance,
     update_carrier_safety as db_update_carrier_safety, get_carriers_by_mc_range,
     fetch_users, fetch_user_by_email, create_user, update_user, delete_user,
-    get_user_password_hash,
+    get_user_password_hash, update_user_last_active,
     fetch_blocked_ips, block_ip, unblock_ip, is_ip_blocked,
     save_fmcsa_register_entries, fetch_fmcsa_register_by_date,
     get_fmcsa_extracted_dates, get_fmcsa_categories, delete_fmcsa_entries_before_date,
@@ -516,12 +516,7 @@ async def api_auth_check_status(request: Request):
     
     # Update last_active and is_online for the user
     if user and user.get("user_id"):
-        from datetime import datetime, timezone
-        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        await update_user(user["user_id"], {
-            "last_active": now_str,
-            "is_online": True,
-        })
+        await update_user_last_active(user["user_id"])
     
     # Check if user's IP is blocked
     ip_blocked = False
@@ -571,13 +566,7 @@ async def api_auth_login(request: Request):
             content={"error": "Login not allowed from this IP address. Contact your administrator."},
         )
     # Update last_active and is_online on login
-    from datetime import datetime, timezone
-    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    await update_user(user["user_id"], {
-        "last_active": now_str,
-        "is_online": True,
-        "ip_address": client_ip or "",
-    })
+    await update_user_last_active(user["user_id"], ip_address=client_ip or "")
 
     token = create_token(
         user_id=user["user_id"],
@@ -623,6 +612,8 @@ async def api_auth_register(request: Request):
     import time as _time
     password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
     signup_ip = client_ip or body.get("ip_address", "")
+    from datetime import datetime, timezone
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     user_data = {
         "user_id": body.get("user_id", f"user-{int(_time.time() * 1000)}"),
         "name": name,
@@ -632,7 +623,7 @@ async def api_auth_register(request: Request):
         "plan": "Insurance",
         "daily_limit": 100000,
         "records_extracted_today": 0,
-        "last_active": "Now",
+        "last_active": now_str,
         "ip_address": signup_ip,
         "is_online": True,
         "is_blocked": False,
