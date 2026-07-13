@@ -10,19 +10,9 @@ _otp_store: dict = {}
 
 OTP_EXPIRY_SECONDS = 600  # 10 minutes
 
-# Email configuration
-# Option 1: Resend API (recommended for Railway - uses HTTP, not SMTP)
+# Resend API configuration (HTTP-based, works on Railway)
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-
-# Option 2: SMTP fallback (for environments that allow outbound SMTP)
-SMTP_HOST = os.getenv("SMTP_HOST", "fleetxsolutions.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
-SMTP_PORT_STARTTLS = int(os.getenv("SMTP_PORT_STARTTLS", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "zayn.sales@fleetxsolutions.com")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "Pakistan@1122")
-
-# From email address
-FROM_EMAIL = os.getenv("FROM_EMAIL", SMTP_USER)
+FROM_EMAIL = os.getenv("FROM_EMAIL", "zayn.sales@aykatc.com")
 
 
 def generate_otp() -> str:
@@ -62,9 +52,16 @@ def cleanup_expired() -> None:
         del _otp_store[k]
 
 
-def _build_html_content(otp_code: str) -> str:
-    """Build the HTML email template."""
-    return f"""
+async def send_otp_email(to_email: str, otp_code: str) -> bool:
+    """Send OTP verification email via Resend HTTP API.
+    
+    Uses HTTPS (port 443) which is not blocked by Railway or any cloud platform.
+    """
+    if not RESEND_API_KEY:
+        print(f"[OTP] WARNING: RESEND_API_KEY not set. OTP for {to_email}: {otp_code}")
+        return False
+
+    html_content = f"""
     <html>
     <body style="font-family: 'Segoe UI', Arial, sans-serif; background-color: #f8fafc; padding: 40px;">
         <div style="max-width: 480px; margin: 0 auto; background: white; border-radius: 16px; padding: 40px; box-shadow: 0 4px 24px rgba(0,0,0,0.08);">
@@ -92,11 +89,6 @@ def _build_html_content(otp_code: str) -> str:
     </html>
     """
 
-
-async def _send_via_resend(to_email: str, otp_code: str) -> bool:
-    """Send email via Resend HTTP API (works on Railway since it uses HTTPS, not SMTP)."""
-    html_content = _build_html_content(otp_code)
-
     payload = {
         "from": FROM_EMAIL,
         "to": [to_email],
@@ -105,6 +97,7 @@ async def _send_via_resend(to_email: str, otp_code: str) -> bool:
     }
 
     try:
+        print(f"[OTP] Sending email to {to_email} via Resend API...")
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 "https://api.resend.com/emails",
@@ -116,88 +109,11 @@ async def _send_via_resend(to_email: str, otp_code: str) -> bool:
             )
 
         if response.status_code in (200, 201):
-            print(f"[OTP] Email sent to {to_email} via Resend API. Response: {response.json()}")
+            print(f"[OTP] SUCCESS: Email sent to {to_email}. Response: {response.json()}")
             return True
         else:
-            print(f"[OTP] Resend API failed for {to_email}: {response.status_code} - {response.text}")
+            print(f"[OTP] FAILED: Resend API returned {response.status_code} for {to_email}: {response.text}")
             return False
     except Exception as e:
-        print(f"[OTP] Resend API error for {to_email}: {type(e).__name__}: {e}")
+        print(f"[OTP] ERROR: Failed to send email to {to_email}: {type(e).__name__}: {e}")
         return False
-
-
-async def _send_via_smtp(to_email: str, otp_code: str) -> bool:
-    """Send email via SMTP (fallback for environments that allow outbound SMTP)."""
-    import ssl
-    import smtplib
-    from email.mime.text import MIMEText
-    from email.mime.multipart import MIMEMultipart
-    import asyncio
-    from concurrent.futures import ThreadPoolExecutor
-
-    html_content = _build_html_content(otp_code)
-    text_content = f"Your FreightIntel verification code is: {otp_code}\n\nThis code expires in 10 minutes."
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = "FreightIntel - Verify Your Email"
-    msg["From"] = FROM_EMAIL
-    msg["To"] = to_email
-    msg.attach(MIMEText(text_content, "plain"))
-    msg.attach(MIMEText(html_content, "html"))
-
-    def _send_sync():
-        context = ssl.create_default_context()
-        # Try SSL on port 465
-        try:
-            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=context, timeout=30) as server:
-                server.login(SMTP_USER, SMTP_PASSWORD)
-                server.sendmail(SMTP_USER, to_email, msg.as_string())
-            return True
-        except Exception as e1:
-            print(f"[OTP] SMTP SSL (port {SMTP_PORT}) failed: {e1}")
-
-        # Try STARTTLS on port 587
-        try:
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT_STARTTLS, timeout=30) as server:
-                server.ehlo()
-                server.starttls(context=context)
-                server.ehlo()
-                server.login(SMTP_USER, SMTP_PASSWORD)
-                server.sendmail(SMTP_USER, to_email, msg.as_string())
-            return True
-        except Exception as e2:
-            print(f"[OTP] SMTP STARTTLS (port {SMTP_PORT_STARTTLS}) failed: {e2}")
-
-        return False
-
-    loop = asyncio.get_event_loop()
-    executor = ThreadPoolExecutor(max_workers=1)
-    try:
-        result = await loop.run_in_executor(executor, _send_sync)
-        if result:
-            print(f"[OTP] Email sent to {to_email} via SMTP")
-        return result
-    except Exception as e:
-        print(f"[OTP] SMTP executor error: {e}")
-        return False
-
-
-async def send_otp_email(to_email: str, otp_code: str) -> bool:
-    """Send OTP verification email.
-    
-    Strategy:
-    1. If RESEND_API_KEY is set, use Resend HTTP API (works on Railway/cloud platforms)
-    2. Otherwise, fall back to SMTP (works on VPS/dedicated servers)
-    """
-    if not SMTP_USER and not RESEND_API_KEY:
-        print(f"[OTP] No email provider configured. OTP for {to_email}: {otp_code}")
-        return True  # Allow development without email
-
-    # Prefer Resend API (HTTP-based, works everywhere including Railway)
-    if RESEND_API_KEY:
-        print(f"[OTP] Using Resend API for {to_email}")
-        return await _send_via_resend(to_email, otp_code)
-
-    # Fallback to SMTP
-    print(f"[OTP] Using SMTP for {to_email} (no RESEND_API_KEY set)")
-    return await _send_via_smtp(to_email, otp_code)
