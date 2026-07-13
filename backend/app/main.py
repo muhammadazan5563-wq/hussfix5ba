@@ -19,6 +19,7 @@ from app.task_manager import task_manager
 from app.fmcsa_register import scrape_fmcsa_register
 from app.broker_snapshot import scrape_broker_snapshot
 from app.auth import create_token, verify_token, require_auth
+from app.otp import generate_otp, store_otp, verify_otp, send_otp_email, cleanup_expired
 from app.database import (
     connect_db, close_db,
     upsert_carrier, fetch_carriers, delete_carrier as db_delete_carrier,
@@ -55,6 +56,8 @@ _PUBLIC_PATHS: set[str] = {
     "/api/get-ip",
     "/api/auth/login",
     "/api/auth/register",
+    "/api/auth/verify-otp",
+    "/api/auth/resend-otp",
     "/api/blocked-ips/check",
 }
 _PUBLIC_PREFIXES: tuple[str, ...] = (
@@ -638,6 +641,27 @@ async def api_auth_register(request: Request):
         "is_blocked": False,
         "allowed_ips": [signup_ip] if signup_ip else [],
     }
+    # Generate OTP and store pending registration
+    cleanup_expired()
+    otp_code = generate_otp()
+    store_otp(email, otp_code, user_data)
+    # Send OTP email
+    email_sent = await send_otp_email(email, otp_code)
+    if not email_sent:
+        return JSONResponse(status_code=500, content={"error": "Failed to send verification email. Please try again."})
+    return {"success": True, "message": "Verification code sent to your email.", "requires_otp": True}
+
+@app.post("/api/auth/verify-otp")
+async def api_auth_verify_otp(request: Request):
+    body = await request.json()
+    email = body.get("email", "").strip().lower()
+    code = body.get("code", "").strip()
+    if not email or not code:
+        return JSONResponse(status_code=400, content={"error": "Email and verification code are required"})
+    user_data = verify_otp(email, code)
+    if not user_data:
+        return JSONResponse(status_code=400, content={"error": "Invalid or expired verification code"})
+    # Create the user now that OTP is verified
     user = await create_user(user_data)
     if not user:
         return JSONResponse(status_code=500, content={"error": "Failed to create user"})
@@ -648,6 +672,29 @@ async def api_auth_register(request: Request):
     )
     user.pop("password_hash", None)
     return {"token": token, "user": user}
+
+@app.post("/api/auth/resend-otp")
+async def api_auth_resend_otp(request: Request):
+    client_ip = _get_request_ip(request)
+    if _is_rate_limited(f"resend-otp:{client_ip}", max_requests=3):
+        return JSONResponse(status_code=429, content={"error": "Too many resend attempts. Please wait a minute."})
+    body = await request.json()
+    email = body.get("email", "").strip().lower()
+    if not email:
+        return JSONResponse(status_code=400, content={"error": "Email is required"})
+    # Check if there's a pending OTP for this email
+    from app.otp import _otp_store
+    entry = _otp_store.get(email)
+    if not entry:
+        return JSONResponse(status_code=400, content={"error": "No pending registration found. Please register again."})
+    # Generate new OTP and update store
+    cleanup_expired()
+    otp_code = generate_otp()
+    store_otp(email, otp_code, entry["user_data"])
+    email_sent = await send_otp_email(email, otp_code)
+    if not email_sent:
+        return JSONResponse(status_code=500, content={"error": "Failed to send verification email. Please try again."})
+    return {"success": True, "message": "New verification code sent to your email."}
 @app.get("/api/users")
 async def api_fetch_users(request: Request):
     if not _require_admin(request):
