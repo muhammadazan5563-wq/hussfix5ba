@@ -1,27 +1,28 @@
 import os
 import random
 import time
-import asyncio
-import smtplib
-import ssl
-from concurrent.futures import ThreadPoolExecutor
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from typing import Optional
+
+import httpx
 
 # In-memory OTP store: {email: {"code": str, "expires": float, "user_data": dict}}
 _otp_store: dict = {}
 
 OTP_EXPIRY_SECONDS = 600  # 10 minutes
 
+# Email configuration
+# Option 1: Resend API (recommended for Railway - uses HTTP, not SMTP)
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+
+# Option 2: SMTP fallback (for environments that allow outbound SMTP)
 SMTP_HOST = os.getenv("SMTP_HOST", "fleetxsolutions.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
 SMTP_PORT_STARTTLS = int(os.getenv("SMTP_PORT_STARTTLS", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "zayn.sales@fleetxsolutions.com")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "Pakistan@1122")
 
-# Thread pool for non-blocking SMTP operations
-_smtp_executor = ThreadPoolExecutor(max_workers=2)
+# From email address
+FROM_EMAIL = os.getenv("FROM_EMAIL", SMTP_USER)
 
 
 def generate_otp() -> str:
@@ -61,69 +62,9 @@ def cleanup_expired() -> None:
         del _otp_store[k]
 
 
-def _send_email_sync(to_email: str, msg_string: str) -> bool:
-    """Synchronous email sending - runs in thread pool to avoid blocking the event loop."""
-    context = ssl.create_default_context()
-
-    # Method 1: Try SMTP_SSL on port 465 (implicit SSL) with 30s timeout
-    try:
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=context, timeout=30) as server:
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(SMTP_USER, to_email, msg_string)
-        print(f"[OTP] Verification email sent to {to_email} via SSL (port {SMTP_PORT})")
-        return True
-    except Exception as e1:
-        print(f"[OTP] SSL (port {SMTP_PORT}) failed for {to_email}: {e1}")
-
-    # Method 2: Try STARTTLS on port 587
-    try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT_STARTTLS, timeout=30) as server:
-            server.ehlo()
-            server.starttls(context=context)
-            server.ehlo()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(SMTP_USER, to_email, msg_string)
-        print(f"[OTP] Verification email sent to {to_email} via STARTTLS (port {SMTP_PORT_STARTTLS})")
-        return True
-    except Exception as e2:
-        print(f"[OTP] STARTTLS (port {SMTP_PORT_STARTTLS}) failed for {to_email}: {e2}")
-
-    # Method 3: Try plain SMTP on port 25 as last resort
-    try:
-        with smtplib.SMTP(SMTP_HOST, 25, timeout=30) as server:
-            server.ehlo()
-            try:
-                server.starttls(context=context)
-                server.ehlo()
-            except Exception:
-                pass  # Continue without TLS if not supported
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(SMTP_USER, to_email, msg_string)
-        print(f"[OTP] Verification email sent to {to_email} via port 25")
-        return True
-    except Exception as e3:
-        print(f"[OTP] Port 25 also failed for {to_email}: {e3}")
-
-    print(f"[OTP] ALL SMTP methods failed for {to_email}. The hosting environment may block outbound SMTP.")
-    return False
-
-
-async def send_otp_email(to_email: str, otp_code: str) -> bool:
-    """Send OTP verification email via SMTP in a background thread (non-blocking).
-    
-    Uses run_in_executor to prevent blocking the asyncio event loop while
-    performing synchronous SMTP operations.
-    """
-    if not SMTP_USER or not SMTP_PASSWORD:
-        print(f"[OTP] SMTP not configured. OTP for {to_email}: {otp_code}")
-        return True  # Allow development without SMTP
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = "FreightIntel - Verify Your Email"
-    msg["From"] = SMTP_USER
-    msg["To"] = to_email
-
-    html_content = f"""
+def _build_html_content(otp_code: str) -> str:
+    """Build the HTML email template."""
+    return f"""
     <html>
     <body style="font-family: 'Segoe UI', Arial, sans-serif; background-color: #f8fafc; padding: 40px;">
         <div style="max-width: 480px; margin: 0 auto; background: white; border-radius: 16px; padding: 40px; box-shadow: 0 4px 24px rgba(0,0,0,0.08);">
@@ -151,19 +92,112 @@ async def send_otp_email(to_email: str, otp_code: str) -> bool:
     </html>
     """
 
+
+async def _send_via_resend(to_email: str, otp_code: str) -> bool:
+    """Send email via Resend HTTP API (works on Railway since it uses HTTPS, not SMTP)."""
+    html_content = _build_html_content(otp_code)
+
+    payload = {
+        "from": FROM_EMAIL,
+        "to": [to_email],
+        "subject": "FreightIntel - Verify Your Email",
+        "html": html_content,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://api.resend.com/emails",
+                headers={
+                    "Authorization": f"Bearer {RESEND_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+
+        if response.status_code in (200, 201):
+            print(f"[OTP] Email sent to {to_email} via Resend API. Response: {response.json()}")
+            return True
+        else:
+            print(f"[OTP] Resend API failed for {to_email}: {response.status_code} - {response.text}")
+            return False
+    except Exception as e:
+        print(f"[OTP] Resend API error for {to_email}: {type(e).__name__}: {e}")
+        return False
+
+
+async def _send_via_smtp(to_email: str, otp_code: str) -> bool:
+    """Send email via SMTP (fallback for environments that allow outbound SMTP)."""
+    import ssl
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    html_content = _build_html_content(otp_code)
     text_content = f"Your FreightIntel verification code is: {otp_code}\n\nThis code expires in 10 minutes."
 
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = "FreightIntel - Verify Your Email"
+    msg["From"] = FROM_EMAIL
+    msg["To"] = to_email
     msg.attach(MIMEText(text_content, "plain"))
     msg.attach(MIMEText(html_content, "html"))
 
-    msg_string = msg.as_string()
+    def _send_sync():
+        context = ssl.create_default_context()
+        # Try SSL on port 465
+        try:
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=context, timeout=30) as server:
+                server.login(SMTP_USER, SMTP_PASSWORD)
+                server.sendmail(SMTP_USER, to_email, msg.as_string())
+            return True
+        except Exception as e1:
+            print(f"[OTP] SMTP SSL (port {SMTP_PORT}) failed: {e1}")
+
+        # Try STARTTLS on port 587
+        try:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT_STARTTLS, timeout=30) as server:
+                server.ehlo()
+                server.starttls(context=context)
+                server.ehlo()
+                server.login(SMTP_USER, SMTP_PASSWORD)
+                server.sendmail(SMTP_USER, to_email, msg.as_string())
+            return True
+        except Exception as e2:
+            print(f"[OTP] SMTP STARTTLS (port {SMTP_PORT_STARTTLS}) failed: {e2}")
+
+        return False
 
     loop = asyncio.get_event_loop()
+    executor = ThreadPoolExecutor(max_workers=1)
     try:
-        result = await loop.run_in_executor(
-            _smtp_executor, _send_email_sync, to_email, msg_string
-        )
+        result = await loop.run_in_executor(executor, _send_sync)
+        if result:
+            print(f"[OTP] Email sent to {to_email} via SMTP")
         return result
     except Exception as e:
-        print(f"[OTP] Executor error for {to_email}: {e}")
+        print(f"[OTP] SMTP executor error: {e}")
         return False
+
+
+async def send_otp_email(to_email: str, otp_code: str) -> bool:
+    """Send OTP verification email.
+    
+    Strategy:
+    1. If RESEND_API_KEY is set, use Resend HTTP API (works on Railway/cloud platforms)
+    2. Otherwise, fall back to SMTP (works on VPS/dedicated servers)
+    """
+    if not SMTP_USER and not RESEND_API_KEY:
+        print(f"[OTP] No email provider configured. OTP for {to_email}: {otp_code}")
+        return True  # Allow development without email
+
+    # Prefer Resend API (HTTP-based, works everywhere including Railway)
+    if RESEND_API_KEY:
+        print(f"[OTP] Using Resend API for {to_email}")
+        return await _send_via_resend(to_email, otp_code)
+
+    # Fallback to SMTP
+    print(f"[OTP] Using SMTP for {to_email} (no RESEND_API_KEY set)")
+    return await _send_via_smtp(to_email, otp_code)
