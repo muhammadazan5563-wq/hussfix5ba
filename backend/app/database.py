@@ -2347,7 +2347,7 @@ async def create_user(user_data: dict) -> Optional[dict]:
             user_data.get("email", "").lower(),
             user_data.get("password_hash"),
             user_data.get("role", "user"),
-            user_data.get("plan", "Insurance"),
+            user_data.get("plan", "Professional"),
             user_data.get("daily_limit", 100000),
             user_data.get("records_extracted_today", 0),
             user_data.get("last_active", "Never"),
