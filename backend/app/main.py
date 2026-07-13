@@ -629,7 +629,7 @@ async def api_auth_register(request: Request):
         "email": email,
         "password_hash": password_hash,
         "role": "user",
-        "plan": "Insurance",
+        "plan": "Professional",
         "daily_limit": 100000,
         "records_extracted_today": 0,
         "last_active": "Now",
