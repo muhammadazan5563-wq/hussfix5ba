@@ -1,8 +1,10 @@
 import os
 import random
 import time
+import asyncio
 import smtplib
 import ssl
+from concurrent.futures import ThreadPoolExecutor
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional
@@ -17,6 +19,9 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
 SMTP_PORT_STARTTLS = int(os.getenv("SMTP_PORT_STARTTLS", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "zayn.sales@fleetxsolutions.com")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "Pakistan@1122")
+
+# Thread pool for non-blocking SMTP operations
+_smtp_executor = ThreadPoolExecutor(max_workers=2)
 
 
 def generate_otp() -> str:
@@ -56,8 +61,59 @@ def cleanup_expired() -> None:
         del _otp_store[k]
 
 
+def _send_email_sync(to_email: str, msg_string: str) -> bool:
+    """Synchronous email sending - runs in thread pool to avoid blocking the event loop."""
+    context = ssl.create_default_context()
+
+    # Method 1: Try SMTP_SSL on port 465 (implicit SSL) with 30s timeout
+    try:
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=context, timeout=30) as server:
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_USER, to_email, msg_string)
+        print(f"[OTP] Verification email sent to {to_email} via SSL (port {SMTP_PORT})")
+        return True
+    except Exception as e1:
+        print(f"[OTP] SSL (port {SMTP_PORT}) failed for {to_email}: {e1}")
+
+    # Method 2: Try STARTTLS on port 587
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT_STARTTLS, timeout=30) as server:
+            server.ehlo()
+            server.starttls(context=context)
+            server.ehlo()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_USER, to_email, msg_string)
+        print(f"[OTP] Verification email sent to {to_email} via STARTTLS (port {SMTP_PORT_STARTTLS})")
+        return True
+    except Exception as e2:
+        print(f"[OTP] STARTTLS (port {SMTP_PORT_STARTTLS}) failed for {to_email}: {e2}")
+
+    # Method 3: Try plain SMTP on port 25 as last resort
+    try:
+        with smtplib.SMTP(SMTP_HOST, 25, timeout=30) as server:
+            server.ehlo()
+            try:
+                server.starttls(context=context)
+                server.ehlo()
+            except Exception:
+                pass  # Continue without TLS if not supported
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_USER, to_email, msg_string)
+        print(f"[OTP] Verification email sent to {to_email} via port 25")
+        return True
+    except Exception as e3:
+        print(f"[OTP] Port 25 also failed for {to_email}: {e3}")
+
+    print(f"[OTP] ALL SMTP methods failed for {to_email}. The hosting environment may block outbound SMTP.")
+    return False
+
+
 async def send_otp_email(to_email: str, otp_code: str) -> bool:
-    """Send OTP verification email via SMTP. Tries SSL (465) first, then STARTTLS (587)."""
+    """Send OTP verification email via SMTP in a background thread (non-blocking).
+    
+    Uses run_in_executor to prevent blocking the asyncio event loop while
+    performing synchronous SMTP operations.
+    """
     if not SMTP_USER or not SMTP_PASSWORD:
         print(f"[OTP] SMTP not configured. OTP for {to_email}: {otp_code}")
         return True  # Allow development without SMTP
@@ -100,46 +156,14 @@ async def send_otp_email(to_email: str, otp_code: str) -> bool:
     msg.attach(MIMEText(text_content, "plain"))
     msg.attach(MIMEText(html_content, "html"))
 
-    context = ssl.create_default_context()
+    msg_string = msg.as_string()
 
-    # Method 1: Try SMTP_SSL on port 465 (implicit SSL) with short timeout
+    loop = asyncio.get_event_loop()
     try:
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=context, timeout=10) as server:
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(SMTP_USER, to_email, msg.as_string())
-        print(f"[OTP] Verification email sent to {to_email} via SSL (port {SMTP_PORT})")
-        return True
-    except Exception as e1:
-        print(f"[OTP] SSL (port {SMTP_PORT}) failed for {to_email}: {e1}")
-
-    # Method 2: Try STARTTLS on port 587
-    try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT_STARTTLS, timeout=10) as server:
-            server.ehlo()
-            server.starttls(context=context)
-            server.ehlo()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(SMTP_USER, to_email, msg.as_string())
-        print(f"[OTP] Verification email sent to {to_email} via STARTTLS (port {SMTP_PORT_STARTTLS})")
-        return True
-    except Exception as e2:
-        print(f"[OTP] STARTTLS (port {SMTP_PORT_STARTTLS}) failed for {to_email}: {e2}")
-
-    # Method 3: Try plain SMTP on port 25 as last resort
-    try:
-        with smtplib.SMTP(SMTP_HOST, 25, timeout=10) as server:
-            server.ehlo()
-            try:
-                server.starttls(context=context)
-                server.ehlo()
-            except Exception:
-                pass  # Continue without TLS if not supported
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(SMTP_USER, to_email, msg.as_string())
-        print(f"[OTP] Verification email sent to {to_email} via port 25")
-        return True
-    except Exception as e3:
-        print(f"[OTP] Port 25 also failed for {to_email}: {e3}")
-
-    print(f"[OTP] ALL SMTP methods failed for {to_email}. The hosting environment may block outbound SMTP.")
-    return False
+        result = await loop.run_in_executor(
+            _smtp_executor, _send_email_sync, to_email, msg_string
+        )
+        return result
+    except Exception as e:
+        print(f"[OTP] Executor error for {to_email}: {e}")
+        return False
