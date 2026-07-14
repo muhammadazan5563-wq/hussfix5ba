@@ -602,6 +602,7 @@ async def api_auth_login(request: Request):
             "is_online": True,
             "is_blocked": user.get("is_blocked", False),
             "allowed_ips": user.get("allowed_ips", []),
+            "has_mailer_access": user.get("has_mailer_access", False),
         },
     }
 @app.post("/api/auth/register")
