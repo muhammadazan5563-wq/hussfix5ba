@@ -538,10 +538,16 @@ async def api_auth_check_status(request: Request):
     elif ip_blocked:
         reason = "Your IP address has been blocked."
     
+    # Check if user's trial has ended
+    trial_ended = False
+    if user and user.get("trial_ended"):
+        trial_ended = True
+
     return {
         "allowed": not is_banned,
         "blocked": is_banned,
         "reason": reason,
+        "trial_ended": trial_ended,
     }
 
 
@@ -603,6 +609,7 @@ async def api_auth_login(request: Request):
             "is_blocked": user.get("is_blocked", False),
             "allowed_ips": user.get("allowed_ips", []),
             "has_mailer_access": user.get("has_mailer_access", False),
+            "trial_ended": user.get("trial_ended", False),
         },
     }
 @app.post("/api/auth/register")
