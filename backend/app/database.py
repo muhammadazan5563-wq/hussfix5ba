@@ -558,6 +558,9 @@ async def connect_db() -> None:
         await conn.execute(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS has_mailer_access BOOLEAN DEFAULT false"
         )
+        await conn.execute(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_ended BOOLEAN DEFAULT false"
+        )
         # Migrate legacy plan names (Free/Starter/Pro/Enterprise) to the new tiers.
         await conn.execute("ALTER TABLE users DROP CONSTRAINT IF EXISTS users_plan_check")
         await conn.execute("UPDATE users SET plan = 'Basic' WHERE plan = 'Free'")
@@ -2296,7 +2299,7 @@ async def fetch_users() -> list[dict]:
         rows = await pool.fetch(
             "SELECT id, user_id, name, email, role, plan, daily_limit, "
             "records_extracted_today, last_active, ip_address, is_online, "
-            "is_blocked, allowed_ips, has_mailer_access, created_at, updated_at FROM users ORDER BY created_at DESC"
+            "is_blocked, allowed_ips, has_mailer_access, trial_ended, created_at, updated_at FROM users ORDER BY created_at DESC"
         )
         from datetime import datetime, timezone, timedelta
         now = datetime.now(timezone.utc)
@@ -2328,7 +2331,7 @@ async def fetch_user_by_email(email: str) -> Optional[dict]:
         row = await pool.fetchrow(
             "SELECT id, user_id, name, email, role, plan, daily_limit, "
             "records_extracted_today, last_active, ip_address, is_online, "
-            "is_blocked, allowed_ips, has_mailer_access, created_at, updated_at FROM users WHERE email = $1",
+            "is_blocked, allowed_ips, has_mailer_access, trial_ended, created_at, updated_at FROM users WHERE email = $1",
             email.lower(),
         )
         return _user_row_to_dict(row) if row else None
@@ -2370,7 +2373,7 @@ async def update_user(user_id: str, user_data: dict) -> bool:
     pool = get_pool()
     _ALLOWED = {"name", "role", "plan", "daily_limit", "records_extracted_today",
                 "last_active", "ip_address", "is_online", "is_blocked", "allowed_ips",
-                "has_mailer_access"}
+                "has_mailer_access", "trial_ended"}
     columns = {k: v for k, v in user_data.items() if k in _ALLOWED}
     if not columns:
         return False
